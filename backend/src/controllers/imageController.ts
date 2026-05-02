@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import sharp from 'sharp';
 import { PrismaClient } from '@prisma/client';
 import type { Request, Response, NextFunction } from 'express';
-import { uploadBuffer, deleteObject, getPresignedUrl } from '../services/storage';
+import { uploadBuffer, deleteObject, getObjectStream } from '../services/storage';
 import { validateImage } from '../validators/imageValidator';
 import { validateFaces } from '../validators/faceValidator';
 import { computePHash, checkSimilarity } from '../validators/similarityValidator';
@@ -195,7 +195,7 @@ export async function getById(req: Request, res: Response, next: NextFunction): 
   }
 }
 
-/** GET /api/images/:id/view — presigned URL for private buckets */
+/** GET /api/images/:id/view — stream image from R2 through the backend */
 export async function viewUrl(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const image = await prisma.image.findUnique({ where: { id: req.params['id'] } });
@@ -203,13 +203,10 @@ export async function viewUrl(req: Request, res: Response, next: NextFunction): 
       res.status(404).json({ error: 'Not found' });
       return;
     }
-    // If bucket is public, redirect directly; otherwise generate presigned URL
-    if (image.url) {
-      res.redirect(image.url);
-      return;
-    }
-    const url = await getPresignedUrl(image.storedKey);
-    res.redirect(url);
+    const { stream, contentType } = await getObjectStream(image.storedKey);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    stream.pipe(res);
   } catch (err) {
     next(err);
   }

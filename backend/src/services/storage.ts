@@ -1,5 +1,5 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import type { Readable } from 'stream';
 
 const clientConfig: ConstructorParameters<typeof S3Client>[0] = {
   region: process.env.S3_REGION ?? 'auto',
@@ -45,10 +45,13 @@ export async function deleteObject(key: string): Promise<void> {
 }
 
 /**
- * Generate a presigned URL for viewing a private object.
- * Expires in 1 hour. Used when S3_PUBLIC_URL is not configured.
+ * Stream an object from R2/S3 directly — avoids presigned URL CORS issues.
+ * Returns the readable body stream and content type.
  */
-export async function getPresignedUrl(key: string, expiresIn = 3600): Promise<string> {
-  const command = new GetObjectCommand({ Bucket: getBucket(), Key: key });
-  return getSignedUrl(s3, command, { expiresIn });
+export async function getObjectStream(key: string): Promise<{ stream: Readable; contentType: string }> {
+  const response = await s3.send(new GetObjectCommand({ Bucket: getBucket(), Key: key }));
+  return {
+    stream: response.Body as Readable,
+    contentType: response.ContentType ?? 'application/octet-stream',
+  };
 }
