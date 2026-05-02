@@ -1,80 +1,94 @@
-import type { CSSProperties } from 'react';
 import type { UploadEntry } from '../types/image';
 
 interface ImageCardProps {
   entry: UploadEntry;
+  onDelete: (id: string) => Promise<void>;
 }
 
-const cardStyle: CSSProperties = {
-  borderRadius: 12,
-  overflow: 'hidden',
-  background: '#fff',
-  boxShadow: '0 1px 4px rgba(0,0,0,0.08)',
-  position: 'relative',
-};
-
-const thumbStyle: CSSProperties = {
-  width: '100%',
-  height: 180,
-  objectFit: 'cover',
-  display: 'block',
-};
-
-const placeholderStyle: CSSProperties = {
-  width: '100%',
-  height: 180,
-  background: '#f5f5f7',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  fontSize: 40,
-};
-
-const overlayStyle: CSSProperties = {
-  position: 'absolute',
-  inset: 0,
-  background: 'rgba(0,0,0,0.35)',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  color: '#fff',
-  fontWeight: 600,
-};
-
-export function ImageCard({ entry }: ImageCardProps) {
+export function ImageCard({ entry, onDelete }: ImageCardProps) {
   const isProcessing = entry.status === 'PROCESSING';
+  const isRejected = entry.status === 'REJECTED';
+  const isAccepted = entry.status === 'ACCEPTED';
 
   return (
-    <article style={cardStyle}>
-      {entry.preview ? (
-        <img src={entry.preview} alt={entry.file.name} style={thumbStyle} />
-      ) : (
-        <div style={placeholderStyle} aria-hidden="true">
-          🖼️
-        </div>
-      )}
+    <article className="image-card" id={`image-card-${entry.id}`}>
+      {/* Thumbnail area */}
+      <div className="image-card__thumb-wrapper">
+        {entry.preview ? (
+          <img
+            src={entry.preview}
+            alt={entry.file.name}
+            className="image-card__thumb"
+            loading="lazy"
+          />
+        ) : (
+          <div className="image-card__placeholder">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <polyline points="21 15 16 10 5 21" />
+            </svg>
+          </div>
+        )}
 
-      {isProcessing && (
-        <div style={overlayStyle} role="status" aria-label="Processing">
-          Processing…
-        </div>
-      )}
+        {/* Processing spinner overlay */}
+        {isProcessing && (
+          <div className="image-card__overlay image-card__overlay--processing" role="status" aria-label="Processing">
+            <div className="image-card__spinner" />
+          </div>
+        )}
 
-      <div style={{ padding: '8px 10px' }}>
-        <p
-          style={{
-            fontSize: 12,
-            fontWeight: 600,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
+        {/* Rejected tint overlay */}
+        {isRejected && entry.preview && (
+          <div className="image-card__overlay image-card__overlay--rejected" />
+        )}
+
+        {/* Status badge */}
+        {isAccepted && (
+          <div className="image-card__status-badge image-card__status-badge--accepted" aria-label="Accepted">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          </div>
+        )}
+        {isRejected && (
+          <div className="image-card__status-badge image-card__status-badge--rejected" aria-label="Rejected">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </div>
+        )}
+
+        {/* Delete button */}
+        <button
+          className="image-card__delete"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(entry.id);
           }}
-          title={entry.file.name}
+          aria-label={`Delete ${entry.file.name}`}
+          title="Delete image"
         >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Card body */}
+      <div className="image-card__body">
+        <p className="image-card__name" title={entry.file.name}>
           {entry.file.name}
         </p>
+        {(entry.widthPx && entry.heightPx) && (
+          <p className="image-card__meta">
+            {entry.widthPx} × {entry.heightPx}px
+          </p>
+        )}
         {entry.rejectionReason && (
-          <p style={{ fontSize: 11, color: '#ff3b30', marginTop: 3, lineHeight: 1.3 }}>
+          <p className="image-card__rejection">
             {entry.rejectionReason}
           </p>
         )}

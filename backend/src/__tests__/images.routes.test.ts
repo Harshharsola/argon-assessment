@@ -1,7 +1,7 @@
 /**
  * Integration tests for /api/images routes.
  *
- * sharp, @prisma/client, and storage are mocked.
+ * sharp, @prisma/client, storage, face validation, and similarity are mocked.
  * The express app is constructed inline (not from app.ts) to avoid
  * side effects from the entry-point module evaluation.
  */
@@ -12,7 +12,7 @@
 
 jest.mock('sharp', () => {
   const chain: Record<string, jest.Mock> = {};
-  for (const m of ['metadata', 'greyscale', 'convolve', 'raw', 'toBuffer', 'clone']) {
+  for (const m of ['metadata', 'greyscale', 'convolve', 'raw', 'toBuffer', 'clone', 'resize']) {
     chain[m] = jest.fn().mockReturnValue(chain);
   }
   const mock = jest.fn().mockReturnValue(chain);
@@ -26,6 +26,7 @@ jest.mock('@prisma/client', () => {
     findMany: jest.fn(),
     findUnique: jest.fn(),
     delete: jest.fn(),
+    update: jest.fn(),
   };
   return {
     PrismaClient: jest.fn().mockImplementation(() => ({ image })),
@@ -36,6 +37,15 @@ jest.mock('@prisma/client', () => {
 jest.mock('../services/storage', () => ({
   uploadBuffer: jest.fn().mockResolvedValue('https://cdn.example.com/images/test.jpg'),
   deleteObject: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('../validators/faceValidator', () => ({
+  validateFaces: jest.fn().mockResolvedValue({ valid: true }),
+}));
+
+jest.mock('../validators/similarityValidator', () => ({
+  computePHash: jest.fn().mockResolvedValue('0'.repeat(64)),
+  checkSimilarity: jest.fn().mockResolvedValue({ similar: false }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -89,21 +99,18 @@ function sharpPixels() {
   return { data, info: { channels: 1 } };
 }
 
-function blurryPixels() {
-  return { data: Buffer.alloc(100, 128), info: { channels: 1 } };
-}
-
 const DB_IMAGE = {
   id: 'uuid-1',
   originalName: 'photo.jpg',
-  storedKey: 'images/uuid-1.jpg',
-  url: 'https://cdn.example.com/images/uuid-1.jpg',
+  storedKey: null,
+  url: null,
   mimeType: 'image/jpeg',
   sizeBytes: 12345,
-  widthPx: 800,
-  heightPx: 800,
-  status: 'ACCEPTED',
+  widthPx: null,
+  heightPx: null,
+  status: 'PROCESSING',
   rejectionReason: null,
+  pHash: null,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };
@@ -113,7 +120,7 @@ beforeEach(() => {
   const chain = getChain();
   chain['metadata']!.mockResolvedValue(VALID_META);
   chain['toBuffer']!.mockResolvedValue(sharpPixels());
-  for (const m of ['greyscale', 'convolve', 'raw', 'clone']) {
+  for (const m of ['greyscale', 'convolve', 'raw', 'clone', 'resize']) {
     chain[m]!.mockReturnValue(chain);
   }
 });
@@ -136,65 +143,18 @@ describe('POST /api/images/upload', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 201 and ACCEPTED for a valid JPEG passing all checks', async () => {
-    getDb()['create']!.mockResolvedValue({ ...DB_IMAGE, status: 'ACCEPTED' });
+  it('returns 202 with PROCESSING status for a valid JPEG (async model)', async () => {
+    getDb()['create']!.mockResolvedValue({ ...DB_IMAGE, status: 'PROCESSING' });
 
     const res = await request(testApp)
       .post('/api/images/upload')
       .attach('image', Buffer.from('fake-jpeg'), { filename: 'photo.jpg', contentType: 'image/jpeg' });
 
-    expect(res.status).toBe(201);
-    expect(res.body.status).toBe('ACCEPTED');
-    expect(res.body.rejectionReason).toBeNull();
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe('PROCESSING');
   });
 
-  it('returns 201 and REJECTED when image is too small', async () => {
-    getChain()['metadata']!.mockResolvedValue({ ...VALID_META, width: 50, height: 50 });
-    getDb()['create']!.mockResolvedValue({
-      ...DB_IMAGE,
-      status: 'REJECTED',
-      rejectionReason: 'Image too small (50×50px). Minimum 200px on each side.',
-      widthPx: 50,
-      heightPx: 50,
-    });
-
-    const res = await request(testApp)
-      .post('/api/images/upload')
-      .attach('image', Buffer.from('fake-jpeg'), { filename: 'tiny.jpg', contentType: 'image/jpeg' });
-
-    expect(res.status).toBe(201);
-    expect(res.body.status).toBe('REJECTED');
-    expect(res.body.rejectionReason).toMatch(/too small/i);
-  });
-
-  it('returns 201 and REJECTED when image is blurry', async () => {
-    getChain()['toBuffer']!.mockResolvedValue(blurryPixels());
-    getDb()['create']!.mockResolvedValue({
-      ...DB_IMAGE,
-      status: 'REJECTED',
-      rejectionReason: 'Image is too blurry (score: 0.0)',
-    });
-
-    const res = await request(testApp)
-      .post('/api/images/upload')
-      .attach('image', Buffer.from('fake-jpeg'), { filename: 'blurry.jpg', contentType: 'image/jpeg' });
-
-    expect(res.status).toBe(201);
-    expect(res.body.status).toBe('REJECTED');
-    expect(res.body.rejectionReason).toMatch(/blurry/i);
-  });
-
-  it('calls uploadBuffer exactly once per request', async () => {
-    getDb()['create']!.mockResolvedValue(DB_IMAGE);
-
-    await request(testApp)
-      .post('/api/images/upload')
-      .attach('image', Buffer.from('fake-jpeg'), { filename: 'photo.jpg', contentType: 'image/jpeg' });
-
-    expect(getStorage().uploadBuffer).toHaveBeenCalledTimes(1);
-  });
-
-  it('persists the original filename to the database', async () => {
+  it('persists the sanitized filename to the database', async () => {
     getDb()['create']!.mockResolvedValue(DB_IMAGE);
 
     await request(testApp)
@@ -212,19 +172,20 @@ describe('POST /api/images/upload', () => {
 // ---------------------------------------------------------------------------
 
 describe('GET /api/images', () => {
-  it('returns 200 with an empty array when there are no images', async () => {
+  it('returns 200 with paginated empty response', async () => {
     getDb()['findMany']!.mockResolvedValue([]);
     const res = await request(testApp).get('/api/images');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual([]);
+    expect(res.body.data).toEqual([]);
+    expect(res.body.hasMore).toBe(false);
   });
 
-  it('returns all stored images', async () => {
+  it('returns paginated images', async () => {
     getDb()['findMany']!.mockResolvedValue([DB_IMAGE]);
     const res = await request(testApp).get('/api/images');
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0].id).toBe(DB_IMAGE.id);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].id).toBe(DB_IMAGE.id);
   });
 });
 
@@ -258,14 +219,26 @@ describe('DELETE /api/images/:id', () => {
     expect(res.status).toBe(404);
   });
 
-  it('deletes from storage and DB for a valid id', async () => {
-    getDb()['findUnique']!.mockResolvedValue(DB_IMAGE);
+  it('deletes from storage and DB for a valid id with storedKey', async () => {
+    const imageWithKey = { ...DB_IMAGE, storedKey: 'images/uuid-1.jpg' };
+    getDb()['findUnique']!.mockResolvedValue(imageWithKey);
+    getDb()['delete']!.mockResolvedValue(imageWithKey);
+
+    const res = await request(testApp).delete(`/api/images/${DB_IMAGE.id}`);
+
+    expect(res.status).toBe(200);
+    expect(getStorage().deleteObject).toHaveBeenCalledWith(imageWithKey.storedKey);
+    expect(getDb()['delete']).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips S3 deletion when storedKey is null (rejected image)', async () => {
+    getDb()['findUnique']!.mockResolvedValue(DB_IMAGE); // storedKey is null
     getDb()['delete']!.mockResolvedValue(DB_IMAGE);
 
     const res = await request(testApp).delete(`/api/images/${DB_IMAGE.id}`);
 
     expect(res.status).toBe(200);
-    expect(getStorage().deleteObject).toHaveBeenCalledWith(DB_IMAGE.storedKey);
+    expect(getStorage().deleteObject).not.toHaveBeenCalled();
     expect(getDb()['delete']).toHaveBeenCalledTimes(1);
   });
 });

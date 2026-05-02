@@ -10,19 +10,21 @@ datasource db {
 model Image {
   id               String   @id @default(uuid())
   originalName     String
-  storedKey        String   // S3/R2 object key
-  url              String   // public URL
+  storedKey        String?  // S3/R2 object key (null for rejected images)
+  url              String?  // public URL (null for rejected images)
   mimeType         String
   sizeBytes        Int
   widthPx          Int?
   heightPx         Int?
   status           ImageStatus @default(PROCESSING)
   rejectionReason  String?
+  pHash            String?     // 64-bit perceptual hash for similarity detection
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
   @@index([status])
   @@index([createdAt])
+  @@index([pHash])
 }
 
 enum ImageStatus {

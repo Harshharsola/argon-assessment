@@ -4,16 +4,24 @@ export type ImageStatus = 'PROCESSING' | 'ACCEPTED' | 'REJECTED';
 export interface ImageRecord {
   id: string;
   originalName: string;
-  storedKey: string;
-  url: string;
+  storedKey: string | null;
+  url: string | null;
   mimeType: string;
   sizeBytes: number;
   widthPx: number | null;
   heightPx: number | null;
   status: ImageStatus;
   rejectionReason: string | null;
+  pHash: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Paginated API response */
+export interface PaginatedResponse {
+  data: ImageRecord[];
+  nextCursor: string | null;
+  hasMore: boolean;
 }
 
 /** Local upload entry (before and after API response) */
@@ -25,4 +33,7 @@ export interface UploadEntry {
   preview: string | null;
   status: ImageStatus;
   rejectionReason: string | null;
+  /** Image dimensions from the server (available after processing) */
+  widthPx?: number | null;
+  heightPx?: number | null;
 }

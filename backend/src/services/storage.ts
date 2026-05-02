@@ -1,4 +1,5 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const clientConfig: ConstructorParameters<typeof S3Client>[0] = {
   region: process.env.S3_REGION ?? 'auto',
@@ -41,4 +42,13 @@ export async function uploadBuffer(
 /** Delete an object from storage by key */
 export async function deleteObject(key: string): Promise<void> {
   await s3.send(new DeleteObjectCommand({ Bucket: getBucket(), Key: key }));
+}
+
+/**
+ * Generate a presigned URL for viewing a private object.
+ * Expires in 1 hour. Used when S3_PUBLIC_URL is not configured.
+ */
+export async function getPresignedUrl(key: string, expiresIn = 3600): Promise<string> {
+  const command = new GetObjectCommand({ Bucket: getBucket(), Key: key });
+  return getSignedUrl(s3, command, { expiresIn });
 }
