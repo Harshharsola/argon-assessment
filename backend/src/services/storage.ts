@@ -14,7 +14,9 @@ if (process.env.S3_ENDPOINT) {
 }
 
 const s3 = new S3Client(clientConfig);
-const BUCKET = process.env.S3_BUCKET_NAME ?? '';
+
+/** Read bucket name lazily so tests can set env vars in beforeEach */
+const getBucket = () => process.env.S3_BUCKET_NAME ?? '';
 
 /**
  * Upload a buffer to S3-compatible storage.
@@ -25,17 +27,18 @@ export async function uploadBuffer(
   buffer: Buffer,
   contentType: string
 ): Promise<string> {
+  const bucket = getBucket();
   await s3.send(
-    new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: buffer, ContentType: contentType })
+    new PutObjectCommand({ Bucket: bucket, Key: key, Body: buffer, ContentType: contentType })
   );
 
   if (process.env.S3_PUBLIC_URL) {
     return `${process.env.S3_PUBLIC_URL}/${key}`;
   }
-  return `https://${BUCKET}.s3.${process.env.S3_REGION}.amazonaws.com/${key}`;
+  return `https://${bucket}.s3.${process.env.S3_REGION}.amazonaws.com/${key}`;
 }
 
 /** Delete an object from storage by key */
 export async function deleteObject(key: string): Promise<void> {
-  await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+  await s3.send(new DeleteObjectCommand({ Bucket: getBucket(), Key: key }));
 }
