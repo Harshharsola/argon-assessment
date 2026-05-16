@@ -367,6 +367,16 @@ body {
 .image-card__overlay--processing {
   background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(4px);
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.image-card__stage-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 0.02em;
+  text-align: center;
+  padding: 0 var(--space-sm);
 }
 
 .image-card__overlay--rejected {
@@ -471,6 +481,32 @@ body {
   color: var(--accent-red);
   margin-top: var(--space-xs);
   line-height: 1.4;
+}
+
+.image-card__meta--ratio {
+  color: var(--accent-green, #4ade80);
+}
+
+.image-card__variants {
+  display: flex;
+  gap: var(--space-xs);
+  margin-top: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.image-card__variant-link {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.image-card__variant-link:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--text-primary);
 }
 
 /* ============================================================

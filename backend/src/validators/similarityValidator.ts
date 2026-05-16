@@ -69,6 +69,7 @@ export async function checkSimilarity(
   prisma: PrismaClient,
   threshold: number = SIMILARITY_THRESHOLD
 ): Promise<SimilarityResult> {
+  if (process.env.SKIP_SIMILARITY_CHECK === 'true' || process.env.SKIP_ALL_VALIDATIONS === 'true') return { similar: false };
   const existingImages = await prisma.image.findMany({
     where: {
       status: 'ACCEPTED',

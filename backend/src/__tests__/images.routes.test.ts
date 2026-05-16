@@ -25,12 +25,18 @@ jest.mock('@prisma/client', () => {
     create: jest.fn(),
     findMany: jest.fn(),
     findUnique: jest.fn(),
+    findUniqueOrThrow: jest.fn(),
     delete: jest.fn(),
     update: jest.fn(),
   };
+  const imageVariant = {
+    findUnique: jest.fn(),
+    upsert: jest.fn(),
+  };
   return {
-    PrismaClient: jest.fn().mockImplementation(() => ({ image })),
+    PrismaClient: jest.fn().mockImplementation(() => ({ image, imageVariant, $queryRaw: jest.fn() })),
     __image: image,
+    __imageVariant: imageVariant,
   };
 });
 
@@ -46,6 +52,19 @@ jest.mock('../validators/faceValidator', () => ({
 jest.mock('../validators/similarityValidator', () => ({
   computePHash: jest.fn().mockResolvedValue('0'.repeat(64)),
   checkSimilarity: jest.fn().mockResolvedValue({ similar: false }),
+}));
+
+jest.mock('../queue/index', () => ({
+  redisConnection: { host: 'localhost', port: 6379 },
+  conversionQueue: { add: jest.fn().mockResolvedValue({ id: 'job-1' }) },
+  compressionQueue: { add: jest.fn().mockResolvedValue({ id: 'job-2' }) },
+  variantQueue: { add: jest.fn().mockResolvedValue({ id: 'job-3' }) },
+}));
+
+// The controller imports prisma from utils/prisma — mock it to use the same mock object
+const { PrismaClient: MockPrisma } = require('@prisma/client');
+jest.mock('../utils/prisma', () => ({
+  prisma: new MockPrisma(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -220,7 +239,7 @@ describe('DELETE /api/images/:id', () => {
   });
 
   it('deletes from storage and DB for a valid id with storedKey', async () => {
-    const imageWithKey = { ...DB_IMAGE, storedKey: 'images/uuid-1.jpg' };
+    const imageWithKey = { ...DB_IMAGE, storedKey: 'images/uuid-1.jpg', stagingKey: null, variants: [] };
     getDb()['findUnique']!.mockResolvedValue(imageWithKey);
     getDb()['delete']!.mockResolvedValue(imageWithKey);
 
@@ -232,7 +251,7 @@ describe('DELETE /api/images/:id', () => {
   });
 
   it('skips S3 deletion when storedKey is null (rejected image)', async () => {
-    getDb()['findUnique']!.mockResolvedValue(DB_IMAGE); // storedKey is null
+    getDb()['findUnique']!.mockResolvedValue({ ...DB_IMAGE, storedKey: null, stagingKey: null, variants: [] });
     getDb()['delete']!.mockResolvedValue(DB_IMAGE);
 
     const res = await request(testApp).delete(`/api/images/${DB_IMAGE.id}`);

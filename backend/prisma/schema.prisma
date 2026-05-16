@@ -8,19 +8,24 @@ datasource db {
 }
 
 model Image {
-  id               String   @id @default(uuid())
+  id               String          @id @default(uuid())
   originalName     String
-  storedKey        String?  // S3/R2 object key (null for rejected images)
-  url              String?  // public URL (null for rejected images)
+  storedKey        String?         // kept for backward compat (null until pipeline complete)
+  stagingKey       String?         // temp R2 key during pipeline; cleared on completion
+  url              String?         // full-variant URL (null until ACCEPTED)
   mimeType         String
   sizeBytes        Int
   widthPx          Int?
   heightPx         Int?
-  status           ImageStatus @default(PROCESSING)
+  status           ImageStatus     @default(PROCESSING)
+  processingStage  ProcessingStage @default(PENDING)
   rejectionReason  String?
-  pHash            String?     // 64-bit perceptual hash for similarity detection
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  pHash            String?
+  compressionRatio Float?          // originalBytes / compressedBytes, set by CompressionWorker
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  variants         ImageVariant[]
 
   @@index([status])
   @@index([createdAt])
@@ -31,4 +36,34 @@ enum ImageStatus {
   PROCESSING
   ACCEPTED
   REJECTED
+}
+
+enum ProcessingStage {
+  PENDING              // awaiting first queue job
+  CONVERTING
+  COMPRESSING
+  GENERATING_VARIANTS
+  COMPLETE
+  FAILED
+}
+
+model ImageVariant {
+  id          String      @id @default(uuid())
+  imageId     String
+  image       Image       @relation(fields: [imageId], references: [id], onDelete: Cascade)
+  variantType VariantType
+  key         String      // R2 object key
+  widthPx     Int
+  heightPx    Int
+  sizeBytes   Int
+  createdAt   DateTime    @default(now())
+
+  @@unique([imageId, variantType])
+  @@index([imageId])
+}
+
+enum VariantType {
+  THUMBNAIL   // 150x150 cover crop
+  WEB         // max 800px wide, aspect-preserved
+  FULL        // normalised JPEG at original dimensions
 }

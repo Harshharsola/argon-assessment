@@ -6,6 +6,9 @@ const router = Router();
 
 router.post('/upload', upload.single('image'), imageController.upload);
 router.get('/', imageController.list);
+router.get('/:id/variants/:type/view', imageController.viewVariant);
+router.get('/:id/variants', imageController.getVariants);
+router.get('/:id/status', imageController.getStatus);
 router.get('/:id/view', imageController.viewUrl);
 router.get('/:id', imageController.getById);
 router.delete('/:id', imageController.remove);

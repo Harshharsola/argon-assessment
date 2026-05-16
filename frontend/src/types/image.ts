@@ -1,6 +1,27 @@
 export type ImageStatus = 'PROCESSING' | 'ACCEPTED' | 'REJECTED';
 
-/** Shape returned by the backend API */
+export type ProcessingStage =
+  | 'PENDING'
+  | 'CONVERTING'
+  | 'COMPRESSING'
+  | 'GENERATING_VARIANTS'
+  | 'COMPLETE'
+  | 'FAILED';
+
+export interface ImageVariant {
+  viewUrl: string;
+  widthPx: number;
+  heightPx: number;
+  sizeBytes: number;
+}
+
+export interface ImageVariants {
+  thumbnail?: ImageVariant;
+  web?: ImageVariant;
+  full?: ImageVariant;
+}
+
+/** Shape returned by GET /api/images/:id */
 export interface ImageRecord {
   id: string;
   originalName: string;
@@ -11,10 +32,20 @@ export interface ImageRecord {
   widthPx: number | null;
   heightPx: number | null;
   status: ImageStatus;
+  processingStage: ProcessingStage | null;
   rejectionReason: string | null;
+  compressionRatio: number | null;
   pHash: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Shape returned by GET /api/images/:id/variants */
+export interface VariantsResponse {
+  imageId: string;
+  compressionRatio: number | null;
+  processingStage: ProcessingStage;
+  variants: ImageVariants;
 }
 
 /** Paginated API response */
@@ -26,14 +57,14 @@ export interface PaginatedResponse {
 
 /** Local upload entry (before and after API response) */
 export interface UploadEntry {
-  /** Temporary local ID before server responds; replaced by server ID on success */
   id: string;
   file: File;
-  /** Object URL for preview — revoke when no longer needed */
   preview: string | null;
   status: ImageStatus;
+  processingStage: ProcessingStage | null;
   rejectionReason: string | null;
-  /** Image dimensions from the server (available after processing) */
   widthPx?: number | null;
   heightPx?: number | null;
+  compressionRatio?: number | null;
+  variants?: ImageVariants;
 }

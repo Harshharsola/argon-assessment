@@ -1,18 +1,38 @@
-import type { UploadEntry } from '../types/image';
+import type { UploadEntry, ProcessingStage } from '../types/image';
 
 interface ImageCardProps {
   entry: UploadEntry;
   onDelete: (id: string) => Promise<void>;
 }
 
+/** Human-readable label for each pipeline stage shown during processing */
+const STAGE_LABELS: Record<ProcessingStage, string> = {
+  PENDING:              'Validating…',
+  CONVERTING:           'Converting…',
+  COMPRESSING:          'Compressing…',
+  GENERATING_VARIANTS:  'Generating variants…',
+  COMPLETE:             'Complete',
+  FAILED:               'Failed',
+};
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function ImageCard({ entry, onDelete }: ImageCardProps) {
   const isProcessing = entry.status === 'PROCESSING';
-  const isRejected = entry.status === 'REJECTED';
-  const isAccepted = entry.status === 'ACCEPTED';
+  const isRejected   = entry.status === 'REJECTED';
+  const isAccepted   = entry.status === 'ACCEPTED';
+
+  const stageLabel = isProcessing && entry.processingStage
+    ? STAGE_LABELS[entry.processingStage]
+    : null;
 
   return (
     <article className="image-card" id={`image-card-${entry.id}`}>
-      {/* Thumbnail area */}
+      {/* Thumbnail */}
       <div className="image-card__thumb-wrapper">
         {entry.preview ? (
           <img
@@ -31,19 +51,20 @@ export function ImageCard({ entry, onDelete }: ImageCardProps) {
           </div>
         )}
 
-        {/* Processing spinner overlay */}
+        {/* Processing overlay — shows current pipeline stage */}
         {isProcessing && (
-          <div className="image-card__overlay image-card__overlay--processing" role="status" aria-label="Processing">
+          <div className="image-card__overlay image-card__overlay--processing" role="status">
             <div className="image-card__spinner" />
+            {stageLabel && (
+              <span className="image-card__stage-label">{stageLabel}</span>
+            )}
           </div>
         )}
 
-        {/* Rejected tint overlay */}
         {isRejected && entry.preview && (
           <div className="image-card__overlay image-card__overlay--rejected" />
         )}
 
-        {/* Status badge */}
         {isAccepted && (
           <div className="image-card__status-badge image-card__status-badge--accepted" aria-label="Accepted">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
@@ -60,13 +81,9 @@ export function ImageCard({ entry, onDelete }: ImageCardProps) {
           </div>
         )}
 
-        {/* Delete button */}
         <button
           className="image-card__delete"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(entry.id);
-          }}
+          onClick={(e) => { e.stopPropagation(); onDelete(entry.id); }}
           aria-label={`Delete ${entry.file.name}`}
           title="Delete image"
         >
@@ -82,15 +99,61 @@ export function ImageCard({ entry, onDelete }: ImageCardProps) {
         <p className="image-card__name" title={entry.file.name}>
           {entry.file.name}
         </p>
-        {(entry.widthPx && entry.heightPx) && (
+
+        {entry.widthPx && entry.heightPx && (
           <p className="image-card__meta">
             {entry.widthPx} × {entry.heightPx}px
           </p>
         )}
-        {entry.rejectionReason && (
-          <p className="image-card__rejection">
-            {entry.rejectionReason}
+
+        {/* Compression ratio — only meaningful on accepted images */}
+        {isAccepted && entry.compressionRatio != null && (
+          <p className="image-card__meta image-card__meta--ratio">
+            {entry.compressionRatio.toFixed(1)}× compression
           </p>
+        )}
+
+        {/* Variant download links */}
+        {isAccepted && entry.variants && (
+          <div className="image-card__variants">
+            {entry.variants.thumbnail && (
+              <a
+                href={entry.variants.thumbnail.viewUrl}
+                className="image-card__variant-link"
+                target="_blank"
+                rel="noreferrer"
+                title={`Thumbnail · ${formatBytes(entry.variants.thumbnail.sizeBytes)}`}
+              >
+                Thumb
+              </a>
+            )}
+            {entry.variants.web && (
+              <a
+                href={entry.variants.web.viewUrl}
+                className="image-card__variant-link"
+                target="_blank"
+                rel="noreferrer"
+                title={`Web · ${entry.variants.web.widthPx}px · ${formatBytes(entry.variants.web.sizeBytes)}`}
+              >
+                Web
+              </a>
+            )}
+            {entry.variants.full && (
+              <a
+                href={entry.variants.full.viewUrl}
+                className="image-card__variant-link"
+                target="_blank"
+                rel="noreferrer"
+                title={`Full · ${entry.variants.full.widthPx}×${entry.variants.full.heightPx}px · ${formatBytes(entry.variants.full.sizeBytes)}`}
+              >
+                Full
+              </a>
+            )}
+          </div>
+        )}
+
+        {entry.rejectionReason && (
+          <p className="image-card__rejection">{entry.rejectionReason}</p>
         )}
       </div>
     </article>

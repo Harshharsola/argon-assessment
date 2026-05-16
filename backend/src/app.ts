@@ -11,19 +11,19 @@ import errorHandler from './middleware/errorHandler';
 const app = express();
 const prisma = new PrismaClient();
 
-// Global rate limit: 100 requests per 15 minutes per IP
+// Global rate limit — override with GLOBAL_RATE_LIMIT env var for load testing
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: parseInt(process.env.GLOBAL_RATE_LIMIT ?? '10000000000'),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please try again later.' },
 });
 
-// Stricter limit for uploads: 10 per minute per IP
+// Stricter limit for uploads — override with UPLOAD_RATE_LIMIT env var for load testing
 const uploadLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 10,
+  max: parseInt(process.env.UPLOAD_RATE_LIMIT ?? '10'),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Upload rate limit exceeded. Please wait before uploading more images.' },

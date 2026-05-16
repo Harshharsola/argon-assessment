@@ -1,39 +1,50 @@
-import { v4 as uuidv4 } from 'uuid';
-import sharp from 'sharp';
-import { PrismaClient } from '@prisma/client';
 import type { Request, Response, NextFunction } from 'express';
 import { uploadBuffer, deleteObject, getObjectStream } from '../services/storage';
 import { validateImage } from '../validators/imageValidator';
 import { validateFaces } from '../validators/faceValidator';
 import { computePHash, checkSimilarity } from '../validators/similarityValidator';
+import { conversionQueue } from '../queue/index';
+import { prisma } from '../utils/prisma';
 
-const prisma = new PrismaClient();
+function sanitizeFilename(name: string): string {
+  return name
+    .replace(/[/\\]/g, '_')
+    .replace(/\0/g, '')
+    .replace(/[<>"'&]/g, '_')
+    .slice(0, 255);
+}
 
 const HEIC_MIMES = new Set(['image/heic', 'image/heif']);
 
 /**
- * Sanitize a filename to prevent path traversal and XSS.
+ * Run the 6-stage validation pipeline then hand off to the BullMQ pipeline.
+ *
+ * Validation always runs on a JPEG-decodable buffer so that sharp-based
+ * validators (blur, pHash, face) work reliably. For HEIC uploads we do a
+ * quick in-memory decode *for validation only* — the original HEIC buffer
+ * is what gets written to staging so the Conversion Worker still owns the
+ * real format-conversion step (conversion after validation).
  */
-function sanitizeFilename(name: string): string {
-  return name
-    .replace(/[/\\]/g, '_')        // strip path separators
-    .replace(/\0/g, '')            // strip null bytes
-    .replace(/[<>"'&]/g, '_')      // strip HTML-special chars
-    .slice(0, 255);                // limit length
-}
-
-/**
- * Process an image asynchronously after the initial HTTP response.
- * In production this would use a proper job queue (Bull/BullMQ + Redis).
- */
-async function processImage(
+async function validateAndEnqueue(
   imageId: string,
   buffer: Buffer,
   mimeType: string,
 ): Promise<void> {
   try {
-    // 1. Validate format, resolution, and blur
-    const validation = await validateImage(buffer);
+    // Decode HEIC → JPEG in memory so all validators can process it.
+    // The original buffer (HEIC) is preserved and written to staging below.
+    let validationBuffer = buffer;
+    if (HEIC_MIMES.has(mimeType)) {
+      const heicConvert = (await import('heic-convert')).default as (opts: {
+        buffer: Buffer;
+        format: 'JPEG' | 'PNG';
+        quality: number;
+      }) => Promise<ArrayBuffer>;
+      const decoded = await heicConvert({ buffer, format: 'JPEG', quality: 0.9 });
+      validationBuffer = Buffer.from(decoded);
+    }
+
+    const validation = await validateImage(validationBuffer);
     if (!validation.valid) {
       await prisma.image.update({
         where: { id: imageId },
@@ -42,8 +53,7 @@ async function processImage(
       return;
     }
 
-    // 2. Validate faces (exactly 1 face, large enough)
-    const faceResult = await validateFaces(buffer);
+    const faceResult = await validateFaces(validationBuffer);
     if (!faceResult.valid) {
       await prisma.image.update({
         where: { id: imageId },
@@ -52,8 +62,7 @@ async function processImage(
       return;
     }
 
-    // 3. Check similarity against existing accepted images
-    const pHash = await computePHash(buffer);
+    const pHash = await computePHash(validationBuffer);
     const similarity = await checkSimilarity(pHash, prisma);
     if (similarity.similar) {
       await prisma.image.update({
@@ -67,33 +76,34 @@ async function processImage(
       return;
     }
 
-    // 4. All checks passed — upload to cloud storage
-    const ext = mimeType === 'image/png' ? 'png' : 'jpg';
-    const key = `images/${uuidv4()}.${ext}`;
-    const url = await uploadBuffer(key, buffer, mimeType);
-
-    const { width, height } = await sharp(buffer).metadata();
+    // All validation passed — upload the ORIGINAL buffer (HEIC stays HEIC)
+    // to the staging key. The Conversion Worker will do the proper conversion.
+    // Only the key string travels through Redis; no large buffers.
+    const ext = HEIC_MIMES.has(mimeType) ? 'heic' : 'jpg';
+    const stagingKey = `staging/${imageId}/original.${ext}`;
+    await uploadBuffer(stagingKey, buffer, mimeType);
 
     await prisma.image.update({
       where: { id: imageId },
-      data: {
-        storedKey: key,
-        url,
-        widthPx: width ?? null,
-        heightPx: height ?? null,
-        status: 'ACCEPTED',
-        pHash,
-      },
+      data: { pHash, stagingKey, processingStage: 'PENDING' },
     });
+
+    // Enqueue first pipeline stage. jobId is deterministic — BullMQ deduplicates
+    // so re-uploading the same image never creates duplicate conversion jobs.
+    await conversionQueue.add(
+      'convert',
+      { imageId, stagingKey },
+      { jobId: `convert-${imageId}` },
+    );
   } catch (err) {
-    console.error(`[processImage] Failed for ${imageId}:`, err);
+    console.error(`[validateAndEnqueue] Failed for ${imageId}:`, err);
     await prisma.image.update({
       where: { id: imageId },
       data: {
         status: 'REJECTED',
         rejectionReason: 'Processing failed unexpectedly. Please try again.',
       },
-    }).catch(() => {}); // Swallow DB errors during error handling
+    }).catch(() => {});
   }
 }
 
@@ -105,46 +115,26 @@ export async function upload(req: Request, res: Response, next: NextFunction): P
       return;
     }
 
-    let buffer = req.file.buffer;
-    let mimeType = req.file.mimetype;
+    const buffer = req.file.buffer;
+    const mimeType = req.file.mimetype;
 
-    // Convert HEIC → JPEG before processing
-    if (HEIC_MIMES.has(mimeType)) {
-      // heic-convert ships CJS without type declarations; import dynamically
-      const heicConvert = (await import('heic-convert')).default as (opts: {
-        buffer: Buffer;
-        format: 'JPEG' | 'PNG';
-        quality: number;
-      }) => Promise<ArrayBuffer>;
+    // NOTE: HEIC conversion is no longer done here — the Conversion Worker
+    // handles format normalisation so the pipeline services match the spec.
 
-      const converted = await heicConvert({ buffer, format: 'JPEG', quality: 0.9 });
-      buffer = Buffer.from(converted);
-      mimeType = 'image/jpeg';
-    }
-
-    // Create the DB record immediately as PROCESSING
     const image = await prisma.image.create({
       data: {
         originalName: sanitizeFilename(req.file.originalname),
-        storedKey: null,
-        url: null,
         mimeType,
         sizeBytes: buffer.length,
-        widthPx: null,
-        heightPx: null,
         status: 'PROCESSING',
-        rejectionReason: null,
       },
     });
 
-    // Respond immediately — processing happens in the background
     res.status(202).json(image);
 
-    // Kick off async processing (non-blocking)
-    // In production, this would enqueue to Bull/BullMQ with Redis
     setImmediate(() => {
-      processImage(image.id, buffer, mimeType).catch((err) =>
-        console.error('[upload] Background processing error:', err)
+      validateAndEnqueue(image.id, buffer, mimeType).catch((err) =>
+        console.error('[upload] validateAndEnqueue error:', err),
       );
     });
   } catch (err) {
@@ -152,7 +142,7 @@ export async function upload(req: Request, res: Response, next: NextFunction): P
   }
 }
 
-/** GET /api/images — with cursor pagination */
+/** GET /api/images — cursor pagination */
 export async function list(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const limit = Math.min(parseInt(req.query['limit'] as string) || 20, 100);
@@ -167,7 +157,7 @@ export async function list(req: Request, res: Response, next: NextFunction): Pro
     const images = await prisma.image.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      take: limit + 1,  // fetch one extra to determine if there's a next page
+      take: limit + 1,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
 
@@ -195,7 +185,92 @@ export async function getById(req: Request, res: Response, next: NextFunction): 
   }
 }
 
-/** GET /api/images/:id/view — stream image from R2 through the backend */
+/** GET /api/images/:id/status — lightweight pipeline status check */
+export async function getStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const image = await prisma.image.findUnique({
+      where: { id: req.params['id'] },
+      select: { id: true, status: true, processingStage: true, rejectionReason: true },
+    });
+    if (!image) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    res.json(image);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** GET /api/images/:id/variants */
+export async function getVariants(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const image = await prisma.image.findUnique({
+      where: { id: req.params['id'] },
+      include: { variants: true },
+    });
+    if (!image) {
+      res.status(404).json({ error: 'Not found' });
+      return;
+    }
+    if (image.status !== 'ACCEPTED') {
+      res.status(409).json({
+        error: 'Variants not yet available',
+        processingStage: image.processingStage,
+      });
+      return;
+    }
+
+    const variants = Object.fromEntries(
+      image.variants.map((v) => [
+        v.variantType.toLowerCase(),
+        {
+          viewUrl:   `/api/images/${image.id}/variants/${v.variantType.toLowerCase()}/view`,
+          widthPx:   v.widthPx,
+          heightPx:  v.heightPx,
+          sizeBytes: v.sizeBytes,
+        },
+      ]),
+    );
+
+    res.json({
+      imageId:          image.id,
+      compressionRatio: image.compressionRatio,
+      processingStage:  image.processingStage,
+      variants,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** GET /api/images/:id/variants/:type/view — stream a specific variant from R2 */
+export async function viewVariant(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const variantType = req.params['type']?.toUpperCase() as 'THUMBNAIL' | 'WEB' | 'FULL';
+    if (!['THUMBNAIL', 'WEB', 'FULL'].includes(variantType)) {
+      res.status(400).json({ error: 'Invalid variant type. Use thumbnail, web, or full.' });
+      return;
+    }
+
+    const variant = await prisma.imageVariant.findUnique({
+      where: { imageId_variantType: { imageId: req.params['id'], variantType } },
+    });
+    if (!variant) {
+      res.status(404).json({ error: 'Variant not found' });
+      return;
+    }
+
+    const { stream, contentType } = await getObjectStream(variant.key);
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    stream.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** GET /api/images/:id/view — stream full image (backward compat) */
 export async function viewUrl(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const image = await prisma.image.findUnique({ where: { id: req.params['id'] } });
@@ -215,14 +290,22 @@ export async function viewUrl(req: Request, res: Response, next: NextFunction): 
 /** DELETE /api/images/:id */
 export async function remove(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const image = await prisma.image.findUnique({ where: { id: req.params['id'] } });
+    const image = await prisma.image.findUnique({
+      where: { id: req.params['id'] },
+      include: { variants: true },
+    });
     if (!image) {
       res.status(404).json({ error: 'Not found' });
       return;
     }
-    if (image.storedKey) {
-      await deleteObject(image.storedKey);
-    }
+
+    const keysToDelete = [
+      image.storedKey,
+      image.stagingKey,
+      ...image.variants.map((v) => v.key),
+    ].filter(Boolean) as string[];
+
+    await Promise.allSettled(keysToDelete.map((k) => deleteObject(k)));
     await prisma.image.delete({ where: { id: req.params['id'] } });
     res.json({ message: 'Deleted' });
   } catch (err) {
